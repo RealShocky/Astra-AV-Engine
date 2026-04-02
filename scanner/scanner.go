@@ -15,11 +15,6 @@ import (
 	"time"
 )
 
-// ============================================================
-// ASTRA AV Engine — Episode 2: YARA Rule Scanning
-// scanner/scanner.go — Core scanning logic
-// ============================================================
-
 // Verdict represents the outcome of a file scan.
 type Verdict string
 

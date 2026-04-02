@@ -11,12 +11,7 @@ import (
 	"github.com/ASTRA-LabsHQ/Astra-AV-Engine/scanner"
 )
 
-// ============================================================
-// ASTRA AV Engine — Episode 2: YARA Rule Scanning
-// main.go — CLI entry point
-// ============================================================
-
-const version = "0.2.0"
+const version = "0.3.0"
 
 // defaultSigDB returns the path to the signature database relative to the binary.
 func defaultSigDB() string {
@@ -40,7 +35,7 @@ func printBanner() {
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Printf(" Astra AV Engine v%s\n", version)
 	fmt.Println(" Advanced Security Research and Analysis")
-	fmt.Println(" Detection: Hash Signatures + YARA Rules")
+	fmt.Println(" Detection: Hash Signatures + YARA Rules + Heuristics")
 	fmt.Println(strings.Repeat("=", 60))
 	fmt.Println()
 }
@@ -94,8 +89,42 @@ func printResult(r scanner.ScanResult) {
 	}
 }
 
-func printSummary(results []scanner.ScanResult, elapsed time.Duration) {
-	total, hashDetected, yaraDetected, errors := 0, 0, 0, 0
+func printHeuristicResult(h scanner.HeuristicResult) {
+	if h.Error != nil {
+		fmt.Printf(" [ERR] Heuristics on %s: %v\n\n", h.FilePath, h.Error)
+		return
+	}
+
+	if h.Detected() {
+		fmt.Printf(" [!] DETECTED (Heuristics) — %s\n", h.FilePath)
+		fmt.Printf("     %-10s: %s\n", "Verdict", "SUSPICIOUS")
+		fmt.Printf("     %-10s: %d / %d threshold\n\n", "Score", h.Score, scanner.HeuristicThreshold)
+
+		// Group matches by category, preserving first-seen order
+		byCategory := make(map[string][]scanner.HeuristicMatch)
+		var categoryOrder []string
+		for _, m := range h.Matches {
+			if _, exists := byCategory[m.Category]; !exists {
+				categoryOrder = append(categoryOrder, m.Category)
+			}
+			byCategory[m.Category] = append(byCategory[m.Category], m)
+		}
+		for _, category := range categoryOrder {
+			fmt.Printf("     [%s]\n", category)
+			for _, hit := range byCategory[category] {
+				fmt.Printf("       %-14s %s\n", "["+hit.Source+"]", hit.Indicator)
+			}
+		}
+		fmt.Println()
+	} else if len(h.Matches) > 0 {
+		// Below threshold but not clean — worth surfacing
+		fmt.Printf(" [~] LOW SUSPICION — %s (score: %d)\n", h.FilePath, h.Score)
+	}
+	// Score 0 / no matches: printResult already printed [CLEAN], so stay quiet
+}
+
+func printSummary(results []scanner.ScanResult, hResults []scanner.HeuristicResult, elapsed time.Duration) {
+	total, hashDetected, yaraDetected, heuristicDetected, errors := 0, 0, 0, 0, 0
 
 	for _, r := range results {
 		total++
@@ -109,17 +138,25 @@ func printSummary(results []scanner.ScanResult, elapsed time.Duration) {
 			errors++
 		}
 	}
+	for _, h := range hResults {
+		if h.Error != nil {
+			errors++
+		} else if h.Detected() {
+			heuristicDetected++
+		}
+	}
 
 	fmt.Println()
 	fmt.Println(strings.Repeat("-", 60))
-	fmt.Printf(" Scan complete    : %s\n", elapsed.Round(time.Millisecond))
-	fmt.Printf(" Files scanned    : %d\n", total)
-	fmt.Printf(" Hash detections  : %d\n", hashDetected)
-	fmt.Printf(" YARA detections  : %d\n", yaraDetected)
-	fmt.Printf(" Errors           : %d\n", errors)
+	fmt.Printf(" Scan complete         : %s\n", elapsed.Round(time.Millisecond))
+	fmt.Printf(" Files scanned         : %d\n", total)
+	fmt.Printf(" Hash detections       : %d\n", hashDetected)
+	fmt.Printf(" YARA detections       : %d\n", yaraDetected)
+	fmt.Printf(" Heuristic detections  : %d\n", heuristicDetected)
+	fmt.Printf(" Errors                : %d\n", errors)
 	fmt.Println(strings.Repeat("-", 60))
 
-	if hashDetected+yaraDetected > 0 {
+	if hashDetected+yaraDetected+heuristicDetected > 0 {
 		fmt.Println("\n *** THREATS DETECTED — DO NOT EXECUTE FLAGGED FILES ***")
 	} else {
 		fmt.Println("\n No threats detected.")
@@ -135,6 +172,7 @@ func main() {
 	scanDir := scanCmd.String("dir", "", "Path to a directory to scan recursively")
 	scanDB := scanCmd.String("db", defaultSigDB(), "Path to signature database")
 	scanRules := scanCmd.String("rules", "", "Path to a YARA rule file or directory (optional)")
+	scanNoHeuristics := scanCmd.Bool("no-heuristics", false, "Disable string & API heuristic scanning")
 
 	addCmd := flag.NewFlagSet("add-hash", flag.ExitOnError)
 	addHash := addCmd.String("hash", "", "Hash value to add")
@@ -144,8 +182,8 @@ func main() {
 
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage:")
-		fmt.Fprintln(os.Stderr, "  astra-av scan --file <path> [--rules <path>]")
-		fmt.Fprintln(os.Stderr, "  astra-av scan --dir  <path> [--rules <path>]")
+		fmt.Fprintln(os.Stderr, "  astra-av scan --file <path> [--rules <path>] [--no-heuristics]")
+		fmt.Fprintln(os.Stderr, "  astra-av scan --dir  <path> [--rules <path>] [--no-heuristics]")
 		fmt.Fprintln(os.Stderr, "  astra-av add-hash --hash <hash> --name <threat>")
 		os.Exit(1)
 	}
@@ -183,10 +221,18 @@ func main() {
 		} else {
 			fmt.Println("[*] YARA scanning disabled (use --rules to enable)")
 		}
+
+		// Heuristics status
+		if !*scanNoHeuristics {
+			fmt.Printf("[*] String & API heuristics enabled (threshold: %d)\n", scanner.HeuristicThreshold)
+		} else {
+			fmt.Println("[*] String & API heuristics disabled")
+		}
 		fmt.Println()
 
 		start := time.Now()
 		var results []scanner.ScanResult
+		var heuristicResults []scanner.HeuristicResult
 
 		if *scanFile != "" {
 			fmt.Printf("[*] Scanning file: %s\n\n", *scanFile)
@@ -198,9 +244,15 @@ func main() {
 
 		for _, r := range results {
 			printResult(r)
+
+			if !*scanNoHeuristics {
+				h := scanner.ScanHeuristics(r.FilePath)
+				heuristicResults = append(heuristicResults, h)
+				printHeuristicResult(h)
+			}
 		}
 
-		printSummary(results, time.Since(start))
+		printSummary(results, heuristicResults, time.Since(start))
 
 	// ── add-hash ─────────────────────────────────────────
 	case "add-hash":

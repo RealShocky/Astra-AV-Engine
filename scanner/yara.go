@@ -1,11 +1,5 @@
 package scanner
 
-// ============================================================
-// ASTRA AV Engine — Episode 2: YARA Rule Scanning
-// scanner/yara.go — YARA scanning via CLI subprocess
-// No CGo required — shells out to the yara binary.
-// ============================================================
-
 import (
 	"bufio"
 	"bytes"
